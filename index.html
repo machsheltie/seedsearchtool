@@ -320,7 +320,7 @@ After searching respond with ONLY this JSON:
   let messages = [{ role: "user", content: userMsg }];
 
   for (let turn = 0; turn < 6; turn++) {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+    const res = await fetch("/.netlify/functions/proxy", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
