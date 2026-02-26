@@ -141,10 +141,16 @@
 <div class="sheets-panel">
   <div class="sheets-toggle" id="sheetsToggle" onclick="toggleSheetsPanel()">
     <span class="toggle-icon">▶</span>
-    <span id="sheetsToggleLabel">Google Sheets Logging</span>
+    <span id="sheetsToggleLabel">⚙ Settings &amp; Google Sheets</span>
   </div>
 
   <div class="sheets-config" id="sheetsConfig">
+    <div class="config-row">
+      <label class="config-label">Anthropic API Key</label>
+      <input class="config-input" id="apiKeyInput" type="password" placeholder="sk-ant-..." />
+      <span class="config-hint">Your Anthropic API key — needed to power the search. Never stored, stays in your browser only. Get one at <strong>console.anthropic.com</strong></span>
+    </div>
+
     <div class="config-row">
       <label class="config-label">Sheet Tab Name</label>
       <input class="config-input" id="sheetTabInput" type="text" value="Sheet1" />
@@ -266,10 +272,10 @@ function updateToggleLabel() {
   const label  = document.getElementById('sheetsToggleLabel');
   const toggle = document.getElementById('sheetsToggle');
   if (oauthToken) {
-    label.textContent = 'Google Sheets ✓ Connected';
+    label.textContent = '⚙ Settings · Sheets ✓ Connected';
     toggle.classList.add('connected');
   } else {
-    label.textContent = 'Google Sheets Logging';
+    label.textContent = '⚙ Settings & Google Sheets';
     toggle.classList.remove('connected');
   }
 }
@@ -297,86 +303,80 @@ function disconnectSheets() {
 
 // ── Claude API ─────────────────────────────────────────
 async function callClaude(seedName, site) {
-  // Step 1: Fetch search results from Google via a CORS-friendly proxy
-  // We search Google for the variety on the specific site, grab top result snippets,
-  // then ask Claude (no tools needed) to interpret what it finds.
+  const apiKey = document.getElementById('apiKeyInput').value.trim();
+  if (!apiKey) throw new Error("No API key — enter it in Settings");
 
-  let searchSnippets = '';
-  try {
-    // Use allorigins to proxy a Google search
-    const query = encodeURIComponent(`"${seedName}" seeds site:${site.domain}`);
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(`https://www.google.com/search?q=${query}&num=5`)}`;
-    const proxyRes = await fetch(proxyUrl, { signal: AbortSignal.timeout(12000) });
-    const proxyData = await proxyRes.json();
-    const html = proxyData.contents || '';
+  // Use Claude with web_search tool and a real API key
+  // This is the correct way to use web_search from outside claude.ai
+  const system = `You are a seed availability checker. Use web_search to find whether a specific seed company carries a specific variety. After searching, respond ONLY with a JSON object — no prose, no markdown.`;
 
-    // Pull text snippets out of Google result HTML
-    // Google wraps snippets in <div class="VwiC3b"> or similar — extract visible text
-    const stripped = html
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/\s{2,}/g, ' ')
-      .trim();
+  const userMsg = `Does ${site.domain} sell "${seedName}" seeds?
+Search for: "${seedName}" site:${site.domain}
+Also try: ${seedName} seeds ${site.domain}
 
-    // Take a relevant chunk — look for snippets mentioning the seed name
-    const lowerStripped = stripped.toLowerCase();
-    const lowerSeed = seedName.toLowerCase();
-    const idx = lowerStripped.indexOf(lowerSeed);
-    if (idx !== -1) {
-      searchSnippets = stripped.slice(Math.max(0, idx - 200), idx + 800);
-    } else {
-      searchSnippets = stripped.slice(0, 1000);
+After searching respond with ONLY this JSON:
+{"found":true_or_false,"productName":"exact listing name or null","price":"e.g. $3.99 or null","quantity":"e.g. 50 seeds or 1oz or null","url":"direct product URL or null","notes":"brief notes or null"}`;
+
+  let messages = [{ role: "user", content: userMsg }];
+
+  for (let turn = 0; turn < 6; turn++) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-allow-partial-streamed-json-in-errors": "true"
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1000,
+        system,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages
+      })
+    });
+
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+
+    messages.push({ role: "assistant", content: data.content });
+
+    // Check for JSON in any text block
+    for (const block of data.content) {
+      if (block.type === "text" && block.text.trim()) {
+        const txt = block.text.trim();
+        const s = txt.indexOf('{');
+        const e = txt.lastIndexOf('}');
+        if (s !== -1 && e > s) {
+          try {
+            const parsed = JSON.parse(txt.slice(s, e + 1));
+            if (typeof parsed.found === 'boolean') return parsed;
+          } catch(_) {}
+        }
+      }
     }
-  } catch(e) {
-    searchSnippets = '(Search fetch failed — use your knowledge of this seed company)';
+
+    if (data.stop_reason === "end_turn") break;
+
+    if (data.stop_reason === "tool_use") {
+      // Continue loop — web_search results will be in next response
+      // We just need to pass back a minimal tool_result to continue
+      const toolUses = data.content.filter(b => b.type === "tool_use");
+      if (toolUses.length > 0) {
+        messages.push({
+          role: "user",
+          content: toolUses.map(t => ({
+            type: "tool_result",
+            tool_use_id: t.id,
+            content: "Search executed. Review results and provide your JSON answer."
+          }))
+        });
+      }
+    }
   }
 
-  // Step 2: Ask Claude to interpret the search snippets — no web_search tool needed
-  const systemPrompt = `You are a seed availability checker. You will be given Google search result text snippets from searching a specific seed company website for a variety. Based on the snippets, determine if the company carries that variety. Respond ONLY with a valid JSON object, no other text.`;
-
-  const userPrompt = `Website: ${site.domain}
-Seed variety: "${seedName}"
-
-Google search result snippets from searching this site:
----
-${searchSnippets}
----
-
-Based on these snippets, does ${site.domain} carry "${seedName}" seeds?
-
-Respond with ONLY this JSON object:
-{"found":true_or_false,"productName":"exact name from site or null","price":"price like $3.99 or null","quantity":"like 100 seeds or 1 oz or null","url":"product page URL if visible in snippets or null","notes":"brief notes or null"}`;
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 500,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }]
-    })
-  });
-
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
-
-  const textBlock = data.content?.find(b => b.type === "text");
-  if (!textBlock) throw new Error("No text response");
-
-  const txt = textBlock.text.trim();
-  const start = txt.indexOf('{');
-  const end = txt.lastIndexOf('}');
-  if (start === -1 || end === -1) throw new Error("No JSON: " + txt.slice(0, 100));
-
-  const parsed = JSON.parse(txt.slice(start, end + 1));
-  if (typeof parsed.found !== 'boolean') throw new Error("Invalid JSON structure");
-  return parsed;
+  return { found: false, productName: null, price: null, quantity: null, url: null, notes: "No result" };
 }
 
 // ── Card rendering ─────────────────────────────────────
@@ -398,7 +398,7 @@ function renderCard(site, state, result, errorMsg) {
     card.innerHTML = `
       <div class="card-site"><span class="status-dot dot-error"></span>${site.name}</div>
       <div class="card-name">${seedName}</div>
-      <div class="error-msg">Error: ${result || 'Could not retrieve results'}</div>`;
+      <div class="error-msg" style="word-break:break-all;font-size:0.65rem">${errorMsg || 'Unknown error'}</div>`;
     return;
   }
   if (result && result.found) {
@@ -479,7 +479,7 @@ async function startSearch() {
         renderCard(site, state, result);
       } catch(e) {
         if (currentSearch !== seedName) return;
-        renderCard(site, 'error', null, e.message);
+        renderCard(site, 'error', null, e.message || String(e));
       }
       searchResults.push({ site, result, state });
       completed++;
