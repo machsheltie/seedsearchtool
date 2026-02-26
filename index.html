@@ -297,37 +297,74 @@ function disconnectSheets() {
 
 // ── Claude API ─────────────────────────────────────────
 async function callClaude(seedName, site) {
-  const prompt = `Search ${site.domain} for "${seedName}" seeds.
+  const prompt = `Search the website ${site.domain} for a seed variety called "${seedName}".
 
-Return a JSON object ONLY (no markdown, no explanation) with this exact structure:
+Search for: site:${site.domain} "${seedName}" seeds
+Also try: "${seedName}" seeds ${site.domain}
+
+After searching, return ONLY a JSON object with no other text, markdown, or explanation:
 {
   "found": true or false,
-  "productName": "exact product name if found, null if not",
-  "price": "price like '$3.99' or null",
-  "quantity": "like '100 seeds' or '1 oz' or null",
-  "url": "direct product URL if found, null if not",
-  "notes": "brief notes like 'organic', 'heirloom', multiple packet sizes, etc. null if none."
+  "productName": "exact product name as shown on site, or null",
+  "price": "lowest listed price like '$3.99', or null",
+  "quantity": "seed count or weight like '100 seeds' or '1 oz', or null",
+  "url": "direct URL to the product page, or null",
+  "notes": "brief notes: organic, heirloom, packet sizes available, etc. null if none."
 }
 
-Use web search to check the site. If exact variety isn't found but a close match exists, note it. Set found to false if not carried.`;
+Set found to false only if the variety is genuinely not sold on that site.`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
+  let messages = [{ role: "user", content: prompt }];
 
-  const data = await res.json();
-  const textBlock = data.content?.find(b => b.type === "text");
-  if (!textBlock) throw new Error("No response");
-  const match = textBlock.text.trim().match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("No JSON");
-  return JSON.parse(match[0]);
+  // Agentic tool-use loop — continue until Claude finishes with the search results
+  for (let turn = 0; turn < 10; turn++) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1500,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages
+      })
+    });
+
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message || 'API error');
+
+    // Append assistant turn to history
+    messages.push({ role: "assistant", content: data.content });
+
+    if (data.stop_reason === "end_turn") {
+      // Claude is done — find the JSON in any text block
+      for (const block of data.content) {
+        if (block.type === "text") {
+          const match = block.text.match(/\{[\s\S]*?\}/);
+          if (match) return JSON.parse(match[0]);
+        }
+      }
+      throw new Error("No JSON in final response");
+    }
+
+    if (data.stop_reason === "tool_use") {
+      // Feed back empty tool results so Claude can process and continue
+      const toolResults = data.content
+        .filter(b => b.type === "tool_use")
+        .map(b => ({ type: "tool_result", tool_use_id: b.id, content: "" }));
+      messages.push({ role: "user", content: toolResults });
+      continue;
+    }
+
+    // Unexpected stop — try to get JSON anyway
+    const textBlock = data.content?.find(b => b.type === "text");
+    if (textBlock) {
+      const match = textBlock.text.match(/\{[\s\S]*?\}/);
+      if (match) return JSON.parse(match[0]);
+    }
+    break;
+  }
+
+  throw new Error("Search did not complete");
 }
 
 // ── Card rendering ─────────────────────────────────────
