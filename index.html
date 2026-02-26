@@ -297,33 +297,34 @@ function disconnectSheets() {
 
 // ── Claude API ─────────────────────────────────────────
 async function callClaude(seedName, site) {
-  const prompt = `Search the website ${site.domain} for a seed variety called "${seedName}".
+  // The web_search tool is server-side and self-contained.
+  // Claude searches, gets results, and responds — all in one API call.
+  // We do NOT need a multi-turn loop; we just need to wait for end_turn.
+  // However the API may return stop_reason="tool_use" mid-stream if Claude
+  // wants to do multiple searches, so we handle that by continuing the loop
+  // and passing the full assistant content back each time.
 
-Search for: site:${site.domain} "${seedName}" seeds
-Also try: "${seedName}" seeds ${site.domain}
+  const systemPrompt = `You are a seed availability checker. When asked about a seed variety on a specific website, use web_search to look it up, then respond with ONLY a valid JSON object — no prose, no markdown fences, just the raw JSON.`;
 
-After searching, return ONLY a JSON object with no other text, markdown, or explanation:
-{
-  "found": true or false,
-  "productName": "exact product name as shown on site, or null",
-  "price": "lowest listed price like '$3.99', or null",
-  "quantity": "seed count or weight like '100 seeds' or '1 oz', or null",
-  "url": "direct URL to the product page, or null",
-  "notes": "brief notes: organic, heirloom, packet sizes available, etc. null if none."
-}
+  const userPrompt = `Does ${site.domain} sell a seed variety called "${seedName}"?
 
-Set found to false only if the variety is genuinely not sold on that site.`;
+Search for it using web_search. Try queries like:
+- "${seedName} seeds site:${site.domain}"  
+- "${seedName} ${site.domain}"
 
-  let messages = [{ role: "user", content: prompt }];
+Then respond with ONLY this JSON (no other text):
+{"found":true_or_false,"productName":"name or null","price":"price or null","quantity":"qty or null","url":"url or null","notes":"notes or null"}`;
 
-  // Agentic tool-use loop — continue until Claude finishes with the search results
-  for (let turn = 0; turn < 10; turn++) {
+  let messages = [{ role: "user", content: userPrompt }];
+
+  for (let turn = 0; turn < 8; turn++) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 1500,
+        max_tokens: 2000,
+        system: systemPrompt,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         messages
       })
@@ -332,43 +333,60 @@ Set found to false only if the variety is genuinely not sold on that site.`;
     const data = await res.json();
     if (data.error) throw new Error(data.error.message || 'API error');
 
-    // Append assistant turn to history
+    // Always add assistant response to history
     messages.push({ role: "assistant", content: data.content });
 
-    if (data.stop_reason === "end_turn") {
-      // Claude is done — find the JSON in any text block
-      for (const block of data.content) {
-        if (block.type === "text") {
-          const match = block.text.match(/\{[\s\S]*?\}/);
-          if (match) return JSON.parse(match[0]);
+    // Check all text blocks for JSON regardless of stop reason
+    for (const block of data.content) {
+      if (block.type === "text" && block.text.trim()) {
+        const txt = block.text.trim();
+        // Find outermost JSON object
+        const start = txt.indexOf('{');
+        const end   = txt.lastIndexOf('}');
+        if (start !== -1 && end !== -1 && end > start) {
+          try {
+            const parsed = JSON.parse(txt.slice(start, end + 1));
+            if (typeof parsed.found === 'boolean') return parsed;
+          } catch(e) { /* keep going */ }
         }
       }
-      throw new Error("No JSON in final response");
+    }
+
+    if (data.stop_reason === "end_turn") {
+      // Claude finished but gave no valid JSON — treat as not found
+      return { found: false, productName: null, price: null, quantity: null, url: null, notes: "No result returned" };
     }
 
     if (data.stop_reason === "tool_use") {
-      // Feed back empty tool results so Claude can process and continue
-      const toolResults = data.content
-        .filter(b => b.type === "tool_use")
-        .map(b => ({ type: "tool_result", tool_use_id: b.id, content: "" }));
-      messages.push({ role: "user", content: toolResults });
+      // Claude used web_search — the results are already in the response content
+      // as web_search_result blocks. We just need to continue so Claude
+      // can read those results and give its final answer.
+      // Pass the full content back (including search results) as the next user turn.
+      const searchResults = data.content
+        .filter(b => b.type === "tool_result" || b.type === "web_search_result")
+        .map(b => ({ type: "tool_result", tool_use_id: b.tool_use_id || b.id, content: b.content || "" }));
+
+      // Also grab tool_use blocks to form proper tool_result responses
+      const toolUseBlocks = data.content.filter(b => b.type === "tool_use");
+      if (toolUseBlocks.length > 0) {
+        // The search was triggered — results come back in the NEXT response automatically
+        // We just need to tell the API to continue by passing a minimal tool_result
+        const toolResultMsg = toolUseBlocks.map(b => ({
+          type: "tool_result",
+          tool_use_id: b.id,
+          content: "Search completed. Please review the search results above and provide your JSON answer."
+        }));
+        messages.push({ role: "user", content: toolResultMsg });
+      }
       continue;
     }
-
-    // Unexpected stop — try to get JSON anyway
-    const textBlock = data.content?.find(b => b.type === "text");
-    if (textBlock) {
-      const match = textBlock.text.match(/\{[\s\S]*?\}/);
-      if (match) return JSON.parse(match[0]);
-    }
-    break;
   }
 
-  throw new Error("Search did not complete");
+  return { found: false, productName: null, price: null, quantity: null, url: null, notes: "Search timed out" };
 }
 
 // ── Card rendering ─────────────────────────────────────
-function renderCard(site, state, result) {
+function renderCard(site, state, result, errorMsg) {
   const card     = document.getElementById('card-' + site.domain);
   if (!card) return;
   const seedName = document.getElementById('seedInput').value;
@@ -386,7 +404,7 @@ function renderCard(site, state, result) {
     card.innerHTML = `
       <div class="card-site"><span class="status-dot dot-error"></span>${site.name}</div>
       <div class="card-name">${seedName}</div>
-      <div class="error-msg">Could not retrieve results</div>`;
+      <div class="error-msg">Error: ${result || 'Could not retrieve results'}</div>`;
     return;
   }
   if (result && result.found) {
@@ -467,7 +485,7 @@ async function startSearch() {
         renderCard(site, state, result);
       } catch(e) {
         if (currentSearch !== seedName) return;
-        renderCard(site, 'error', null);
+        renderCard(site, 'error', null, e.message);
       }
       searchResults.push({ site, result, state });
       completed++;
