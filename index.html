@@ -297,92 +297,86 @@ function disconnectSheets() {
 
 // ── Claude API ─────────────────────────────────────────
 async function callClaude(seedName, site) {
-  // The web_search tool is server-side and self-contained.
-  // Claude searches, gets results, and responds — all in one API call.
-  // We do NOT need a multi-turn loop; we just need to wait for end_turn.
-  // However the API may return stop_reason="tool_use" mid-stream if Claude
-  // wants to do multiple searches, so we handle that by continuing the loop
-  // and passing the full assistant content back each time.
+  // Step 1: Fetch search results from Google via a CORS-friendly proxy
+  // We search Google for the variety on the specific site, grab top result snippets,
+  // then ask Claude (no tools needed) to interpret what it finds.
 
-  const systemPrompt = `You are a seed availability checker. When asked about a seed variety on a specific website, use web_search to look it up, then respond with ONLY a valid JSON object — no prose, no markdown fences, just the raw JSON.`;
+  let searchSnippets = '';
+  try {
+    // Use allorigins to proxy a Google search
+    const query = encodeURIComponent(`"${seedName}" seeds site:${site.domain}`);
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(`https://www.google.com/search?q=${query}&num=5`)}`;
+    const proxyRes = await fetch(proxyUrl, { signal: AbortSignal.timeout(12000) });
+    const proxyData = await proxyRes.json();
+    const html = proxyData.contents || '';
 
-  const userPrompt = `Does ${site.domain} sell a seed variety called "${seedName}"?
+    // Pull text snippets out of Google result HTML
+    // Google wraps snippets in <div class="VwiC3b"> or similar — extract visible text
+    const stripped = html
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\s{2,}/g, ' ')
+      .trim();
 
-Search for it using web_search. Try queries like:
-- "${seedName} seeds site:${site.domain}"  
-- "${seedName} ${site.domain}"
-
-Then respond with ONLY this JSON (no other text):
-{"found":true_or_false,"productName":"name or null","price":"price or null","quantity":"qty or null","url":"url or null","notes":"notes or null"}`;
-
-  let messages = [{ role: "user", content: userPrompt }];
-
-  for (let turn = 0; turn < 8; turn++) {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 2000,
-        system: systemPrompt,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        messages
-      })
-    });
-
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message || 'API error');
-
-    // Always add assistant response to history
-    messages.push({ role: "assistant", content: data.content });
-
-    // Check all text blocks for JSON regardless of stop reason
-    for (const block of data.content) {
-      if (block.type === "text" && block.text.trim()) {
-        const txt = block.text.trim();
-        // Find outermost JSON object
-        const start = txt.indexOf('{');
-        const end   = txt.lastIndexOf('}');
-        if (start !== -1 && end !== -1 && end > start) {
-          try {
-            const parsed = JSON.parse(txt.slice(start, end + 1));
-            if (typeof parsed.found === 'boolean') return parsed;
-          } catch(e) { /* keep going */ }
-        }
-      }
+    // Take a relevant chunk — look for snippets mentioning the seed name
+    const lowerStripped = stripped.toLowerCase();
+    const lowerSeed = seedName.toLowerCase();
+    const idx = lowerStripped.indexOf(lowerSeed);
+    if (idx !== -1) {
+      searchSnippets = stripped.slice(Math.max(0, idx - 200), idx + 800);
+    } else {
+      searchSnippets = stripped.slice(0, 1000);
     }
-
-    if (data.stop_reason === "end_turn") {
-      // Claude finished but gave no valid JSON — treat as not found
-      return { found: false, productName: null, price: null, quantity: null, url: null, notes: "No result returned" };
-    }
-
-    if (data.stop_reason === "tool_use") {
-      // Claude used web_search — the results are already in the response content
-      // as web_search_result blocks. We just need to continue so Claude
-      // can read those results and give its final answer.
-      // Pass the full content back (including search results) as the next user turn.
-      const searchResults = data.content
-        .filter(b => b.type === "tool_result" || b.type === "web_search_result")
-        .map(b => ({ type: "tool_result", tool_use_id: b.tool_use_id || b.id, content: b.content || "" }));
-
-      // Also grab tool_use blocks to form proper tool_result responses
-      const toolUseBlocks = data.content.filter(b => b.type === "tool_use");
-      if (toolUseBlocks.length > 0) {
-        // The search was triggered — results come back in the NEXT response automatically
-        // We just need to tell the API to continue by passing a minimal tool_result
-        const toolResultMsg = toolUseBlocks.map(b => ({
-          type: "tool_result",
-          tool_use_id: b.id,
-          content: "Search completed. Please review the search results above and provide your JSON answer."
-        }));
-        messages.push({ role: "user", content: toolResultMsg });
-      }
-      continue;
-    }
+  } catch(e) {
+    searchSnippets = '(Search fetch failed — use your knowledge of this seed company)';
   }
 
-  return { found: false, productName: null, price: null, quantity: null, url: null, notes: "Search timed out" };
+  // Step 2: Ask Claude to interpret the search snippets — no web_search tool needed
+  const systemPrompt = `You are a seed availability checker. You will be given Google search result text snippets from searching a specific seed company website for a variety. Based on the snippets, determine if the company carries that variety. Respond ONLY with a valid JSON object, no other text.`;
+
+  const userPrompt = `Website: ${site.domain}
+Seed variety: "${seedName}"
+
+Google search result snippets from searching this site:
+---
+${searchSnippets}
+---
+
+Based on these snippets, does ${site.domain} carry "${seedName}" seeds?
+
+Respond with ONLY this JSON object:
+{"found":true_or_false,"productName":"exact name from site or null","price":"price like $3.99 or null","quantity":"like 100 seeds or 1 oz or null","url":"product page URL if visible in snippets or null","notes":"brief notes or null"}`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 500,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }]
+    })
+  });
+
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+
+  const textBlock = data.content?.find(b => b.type === "text");
+  if (!textBlock) throw new Error("No text response");
+
+  const txt = textBlock.text.trim();
+  const start = txt.indexOf('{');
+  const end = txt.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error("No JSON: " + txt.slice(0, 100));
+
+  const parsed = JSON.parse(txt.slice(start, end + 1));
+  if (typeof parsed.found !== 'boolean') throw new Error("Invalid JSON structure");
+  return parsed;
 }
 
 // ── Card rendering ─────────────────────────────────────
