@@ -171,7 +171,7 @@
     <input type="text" id="seedInput" placeholder="e.g. Dragon Tongue Bean, Mortgage Lifter Tomato…" autocomplete="off" />
     <button id="searchBtn" onclick="startSearch()">Scout It</button>
   </div>
-  <p class="hint">Enter a variety name — Claude will search each company for availability, price, and quantity</p>
+  <p class="hint">Enter a variety name — Claude will check all 26 companies from its catalog knowledge</p>
 </div>
 
 <div id="status"></div>
@@ -302,81 +302,44 @@ function disconnectSheets() {
 }
 
 // ── Claude API ─────────────────────────────────────────
-async function callClaude(seedName, site) {
+async function callClaude(seedName) {
   const apiKey = document.getElementById('apiKeyInput').value.trim();
   if (!apiKey) throw new Error("No API key — enter it in Settings");
 
-  // Use Claude with web_search tool and a real API key
-  // This is the correct way to use web_search from outside claude.ai
-  const system = `You are a seed availability checker. Use web_search to find whether a specific seed company carries a specific variety. After searching, respond ONLY with a JSON object — no prose, no markdown.`;
+  const siteList = SITES.map((s, i) => `${i + 1}. ${s.name} (${s.domain})`).join('\n');
 
-  const userMsg = `Does ${site.domain} sell "${seedName}" seeds?
-Search for: "${seedName}" site:${site.domain}
-Also try: ${seedName} seeds ${site.domain}
+  const system = `You are a seed catalog expert. Answer from your training knowledge about what US seed companies carry. Respond ONLY with a JSON array — no prose, no markdown, no code fences.`;
 
-After searching respond with ONLY this JSON:
-{"found":true_or_false,"productName":"exact listing name or null","price":"e.g. $3.99 or null","quantity":"e.g. 50 seeds or 1oz or null","url":"direct product URL or null","notes":"brief notes or null"}`;
+  const userMsg = `Which of these seed companies carry "${seedName}" seeds? For each, provide your best knowledge. If you're not confident, use found:false.
 
-  let messages = [{ role: "user", content: userMsg }];
+${siteList}
 
-  for (let turn = 0; turn < 6; turn++) {
-    const res = await fetch("/.netlify/functions/proxy", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-allow-partial-streamed-json-in-errors": "true"
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1000,
-        system,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        messages
-      })
-    });
+Respond with ONLY a JSON array with exactly ${SITES.length} objects in the same order, using this shape:
+{"domain":"example.com","found":true,"productName":"variety name as listed or null","price":"e.g. $3.99 or null","quantity":"e.g. 50 seeds or null","notes":"brief note or null"}`;
 
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
+  const res = await fetch("/.netlify/functions/proxy", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 3000,
+      system,
+      messages: [{ role: "user", content: userMsg }]
+    })
+  });
 
-    messages.push({ role: "assistant", content: data.content });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
 
-    // Check for JSON in any text block
-    for (const block of data.content) {
-      if (block.type === "text" && block.text.trim()) {
-        const txt = block.text.trim();
-        const s = txt.indexOf('{');
-        const e = txt.lastIndexOf('}');
-        if (s !== -1 && e > s) {
-          try {
-            const parsed = JSON.parse(txt.slice(s, e + 1));
-            if (typeof parsed.found === 'boolean') return parsed;
-          } catch(_) {}
-        }
-      }
-    }
-
-    if (data.stop_reason === "end_turn") break;
-
-    if (data.stop_reason === "tool_use") {
-      // Continue loop — web_search results will be in next response
-      // We just need to pass back a minimal tool_result to continue
-      const toolUses = data.content.filter(b => b.type === "tool_use");
-      if (toolUses.length > 0) {
-        messages.push({
-          role: "user",
-          content: toolUses.map(t => ({
-            type: "tool_result",
-            tool_use_id: t.id,
-            content: "Search executed. Review results and provide your JSON answer."
-          }))
-        });
-      }
-    }
-  }
-
-  return { found: false, productName: null, price: null, quantity: null, url: null, notes: "No result" };
+  const text = (data.content || []).find(b => b.type === 'text')?.text || '';
+  const s = text.indexOf('[');
+  const e = text.lastIndexOf(']');
+  if (s === -1 || e <= s) throw new Error("Unexpected response from Claude");
+  return JSON.parse(text.slice(s, e + 1));
 }
 
 // ── Card rendering ─────────────────────────────────────
@@ -455,44 +418,34 @@ async function startSearch() {
         <div class="card searching" id="card-${s.domain}">
           <div class="card-site"><span class="status-dot dot-searching"></span>${s.name}</div>
           <div class="card-name">${seedName}</div>
-          <div class="searching-msg">Queued…</div>
+          <div class="searching-msg">Asking Claude…</div>
         </div>`).join('')}
     </div>`;
 
-  status.innerHTML = `<span class="spinner"></span> Searching 26 seed companies…`;
+  status.innerHTML = `<span class="spinner"></span> Consulting Claude on all 26 companies…`;
 
-  let completed = 0, found = 0;
-  const BATCH = 2;
-  const BATCH_DELAY_MS = 8000;
+  try {
+    const allResults = await callClaude(seedName);
+    if (currentSearch !== seedName) return;
 
-  for (let i = 0; i < SITES.length; i += BATCH) {
-    if (currentSearch !== seedName) break;
-    if (i > 0) await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
-    const batch = SITES.slice(i, i + BATCH);
-    batch.forEach(s => renderCard(s, 'searching', null));
-
-    await Promise.all(batch.map(async (site) => {
-      let result = null, state = 'error';
-      try {
-        result = await callClaude(seedName, site);
-        if (currentSearch !== seedName) return;
-        state = 'done';
-        if (result.found) found++;
-        renderCard(site, state, result);
-      } catch(e) {
-        if (currentSearch !== seedName) return;
-        renderCard(site, 'error', null, e.message || String(e));
-      }
+    let found = 0;
+    SITES.forEach((site, i) => {
+      const result = allResults[i] || null;
+      const state  = 'done';
+      if (result && result.found) found++;
+      renderCard(site, state, result);
       searchResults.push({ site, result, state });
-      completed++;
-      status.innerHTML = `<span class="spinner"></span> Checking… ${completed}/${SITES.length} complete · ${found} found so far`;
-      updateSummary(seedName, completed, found);
-    }));
+    });
+
+    updateSummary(seedName, SITES.length, found);
+    status.innerHTML = `✓ Done — ${found} of ${SITES.length} companies carry <em>${seedName}</em>`;
+
+  } catch(e) {
+    status.innerHTML = `Error: ${e.message}`;
+    SITES.forEach(site => renderCard(site, 'error', null, e.message));
   }
 
-  status.innerHTML = `✓ Done — ${found} of ${SITES.length} companies carry <em>${seedName}</em>`;
   btn.disabled = false;
-
   document.getElementById('exportBar').style.display = 'flex';
   if (oauthToken) {
     document.getElementById('sheetsLogBtn').style.display = 'inline-block';
