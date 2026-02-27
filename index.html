@@ -507,15 +507,15 @@ async function startSearch() {
 // ── CSV export ─────────────────────────────────────────
 function exportCSV() {
   const seedName = document.getElementById('seedInput').value.trim();
-  const headers  = ['Date','Variety','Company','Domain','Found?','Product Name','Price','Quantity','Notes','URL'];
+  const headers  = ['Date','Variety','Found?','Product Name','Price','Quantity','Notes','URL'];
   const now      = new Date().toLocaleDateString();
 
   const rows = searchResults.map(({ site, result, state }) => {
     if (state === 'error' || !result)
-      return [now, seedName, site.name, site.domain, 'Error', '', '', '', '', ''];
+      return [now, seedName, 'Error', '', '', '', '', ''];
     if (!result.found)
-      return [now, seedName, site.name, site.domain, 'No', '', '', '', '', ''];
-    return [now, seedName, site.name, site.domain, 'Yes',
+      return [now, seedName, 'No', '', '', '', '', ''];
+    return [now, seedName, 'Yes',
       result.productName || '', result.price || '',
       result.quantity || '', result.notes || '', result.url || ''];
   });
@@ -543,14 +543,14 @@ async function logToSheets(auto = false) {
   if (logBtn) { logBtn.disabled = true; logBtn.textContent = '↗ Logging…'; }
 
   const now     = new Date().toLocaleString();
-  const HEADERS = ['Date Searched','Variety','Company','Domain','Found?','Product Name','Price','Quantity','Notes','URL'];
+  const HEADERS = ['Date Searched','Variety','Found?','Product Name','Price','Quantity','Notes','URL'];
 
   const rows = searchResults.map(({ site, result, state }) => {
     if (state === 'error' || !result)
-      return [now, seedName, site.name, site.domain, 'Error', '', '', '', '', ''];
+      return [now, seedName, 'Error', '', '', '', '', ''];
     if (!result.found)
-      return [now, seedName, site.name, site.domain, 'No', '', '', '', '', ''];
-    return [now, seedName, site.name, site.domain, 'Yes',
+      return [now, seedName, 'No', '', '', '', '', ''];
+    return [now, seedName, 'Yes',
       result.productName || '', result.price || '',
       result.quantity || '', result.notes || '', result.url || ''];
   });
