@@ -301,85 +301,28 @@ function disconnectSheets() {
   updateToggleLabel();
 }
 
-// ── Claude API ─────────────────────────────────────────
+// ── Search via Jina + Claude ────────────────────────────
 async function callClaudeBatch(seedName, sites) {
   const apiKey = document.getElementById('apiKeyInput').value.trim();
   if (!apiKey) throw new Error("No API key — enter it in Settings");
 
-  const siteList = sites.map((s, i) => `${i + 1}. ${s.name} — search: "${seedName}" site:${s.domain}`).join('\n');
+  const res = await fetch("/.netlify/functions/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey
+    },
+    body: JSON.stringify({ seedName, sites })
+  });
 
-  const system = `You are a seed availability checker. Search each site individually to find product pages. Respond ONLY with a JSON array — no prose, no markdown, no code fences.`;
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
 
-  const userMsg = `Check if each of these sites carries "${seedName}" seeds. Do one targeted search per site to find the product page and price:
-
-${siteList}
-
-After searching all ${sites.length} sites, respond with ONLY a JSON array with exactly ${sites.length} objects in the same order:
-[{"domain":"example.com","found":true,"productName":"exact name or null","price":"$X.XX or null","quantity":"e.g. 50 seeds or null","url":"product URL or null","notes":null}]
-Only use found:true when you confirmed the product page exists. Always include price when visible on the page.`;
-
-  let messages = [{ role: "user", content: userMsg }];
-
-  // Allow enough turns for one search per site plus final response
-  const maxTurns = sites.length * 2 + 2;
-
-  for (let turn = 0; turn < maxTurns; turn++) {
-    const res = await fetch("/.netlify/functions/proxy", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1500,
-        system,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        messages
-      })
-    });
-
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-
-    messages.push({ role: "assistant", content: data.content });
-
-    for (const block of data.content) {
-      if (block.type === "text" && block.text.trim()) {
-        const txt = block.text.trim();
-        const s = txt.indexOf('[');
-        const e = txt.lastIndexOf(']');
-        if (s !== -1 && e > s) {
-          try {
-            const parsed = JSON.parse(txt.slice(s, e + 1));
-            if (Array.isArray(parsed)) return parsed;
-          } catch(_) {}
-        }
-      }
-    }
-
-    if (data.stop_reason === "end_turn") break;
-
-    if (data.stop_reason === "tool_use") {
-      const toolUses = data.content.filter(b => b.type === "tool_use");
-      if (toolUses.length > 0) {
-        const remaining = sites.length - Math.floor(turn / 2);
-        messages.push({
-          role: "user",
-          content: toolUses.map(t => ({
-            type: "tool_result",
-            tool_use_id: t.id,
-            content: remaining > 1
-              ? `Search complete. Continue searching the remaining sites.`
-              : `Search complete. You have checked all sites. Now provide the JSON array.`
-          }))
-        });
-      }
-    }
-  }
-
-  return sites.map(s => ({ domain: s.domain, found: false, productName: null, price: null, quantity: null, url: null, notes: null }));
+  const text = (data.content || []).find(b => b.type === "text")?.text || "";
+  const s = text.indexOf("[");
+  const e = text.lastIndexOf("]");
+  if (s === -1 || e <= s) throw new Error("Unexpected response from search");
+  return JSON.parse(text.slice(s, e + 1));
 }
 
 // ── Card rendering ─────────────────────────────────────
@@ -465,13 +408,11 @@ async function startSearch() {
   status.innerHTML = `<span class="spinner"></span> Searching 26 seed companies…`;
 
   const BATCH_SIZE = 5;
-  const BATCH_DELAY_MS = 12000;
   let completed = 0, found = 0, batchNum = 0;
   const totalBatches = Math.ceil(SITES.length / BATCH_SIZE);
 
   for (let i = 0; i < SITES.length; i += BATCH_SIZE) {
     if (currentSearch !== seedName) break;
-    if (i > 0) await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
     const batch = SITES.slice(i, i + BATCH_SIZE);
     batchNum++;
 
