@@ -407,7 +407,7 @@ async function startSearch() {
 
   status.innerHTML = `<span class="spinner"></span> Searching 26 seed companies…`;
 
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = 3;
   let completed = 0, found = 0, batchNum = 0;
   const totalBatches = Math.ceil(SITES.length / BATCH_SIZE);
 

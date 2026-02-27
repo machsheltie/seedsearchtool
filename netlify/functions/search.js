@@ -14,7 +14,15 @@ exports.handler = async function(event) {
 
   const { seedName, sites } = JSON.parse(event.body);
 
-  // Search URL overrides for sites that don't use the standard /search?q= pattern
+  // Shopify stores expose a clean JSON search API — much faster and more reliable than Jina
+  const shopifyDomains = new Set([
+    "trueleafmarket.com", "highmowingseeds.com", "seedsnow.com",
+    "hudsonvalleyseed.com", "wildboarfarms.com", "threshseed.com",
+    "ufseeds.com", "edenbrothers.com", "territorialseed.com",
+    "beneseeds.com", "asiangarden2table.com", "selectseeds.com",
+  ]);
+
+  // Search URL overrides for non-Shopify sites
   const searchOverrides = {
     "rareseeds.com":         `https://www.rareseeds.com/catalogsearch/result/?q=`,
     "fedcoseeds.com":        `https://www.fedcoseeds.com/seeds/search?q=`,
@@ -26,41 +34,52 @@ exports.handler = async function(event) {
     "victoryseeds.com":      `https://www.victoryseeds.com/catalog/search.php?search_query=`,
     "tomatofest.com":        `https://tomatofest.com/search?q=`,
     "tomatogrowers.com":     `https://www.tomatogrowers.com/search?q=`,
+    "seedsavers.org":        `https://www.seedsavers.org/search?q=`,
+    "vermontbean.com":       `https://www.vermontbean.com/search?q=`,
+    "seedsnsuch.com":        `https://www.seedsnsuch.com/search?q=`,
+    "tradewindsfruit.com":   `https://www.tradewindsfruit.com/search?q=`,
   };
 
-  // Fetch each site's own search results page via Jina Reader (free, server-side)
+  const firstWord = seedName.split(" ")[0].toLowerCase();
+
   const snippets = await Promise.all(sites.map(async (site) => {
     try {
+      // --- Shopify JSON API (fast, structured) ---
+      if (shopifyDomains.has(site.domain)) {
+        const url = `https://${site.domain}/search.json?q=${encodeURIComponent(seedName)}&type=product`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+        const json = await res.json();
+        const products = (json.results || []).slice(0, 6);
+        if (products.length === 0) return `### ${site.name} (${site.domain})\nNo products found.`;
+        const lines = products.map(p =>
+          `- ${p.title} | $${p.price} | https://${site.domain}${p.url}`
+        ).join("\n");
+        return `### ${site.name} (${site.domain})\n${lines}`;
+      }
+
+      // --- Jina Reader for non-Shopify sites ---
       const base = searchOverrides[site.domain] || `https://${site.domain}/search?q=`;
-      const searchUrl = base + encodeURIComponent(seedName);
-      const jinaUrl = `https://r.jina.ai/${searchUrl}`;
+      const jinaUrl = `https://r.jina.ai/${base}${encodeURIComponent(seedName)}`;
       const res = await fetch(jinaUrl, {
         headers: { "Accept": "text/plain", "X-No-Cache": "true" },
-        signal: AbortSignal.timeout(12000)
+        signal: AbortSignal.timeout(6000)
       });
       const text = await res.text();
       const textLower = text.toLowerCase();
-
-      // Search for the variety name in the page (skip first 1500 chars of nav/header)
-      // Use first word of variety name as it's usually the most distinctive
-      const firstWord = seedName.split(' ')[0].toLowerCase();
       const nameIdx = textLower.indexOf(firstWord, 1500);
-
       let content;
       if (nameIdx > 0) {
-        // Found the variety name — extract around it to capture name + price + nearby listings
         content = text.slice(Math.max(0, nameIdx - 100), nameIdx + 3000);
       } else {
-        // Variety name not found — grab a mid-page chunk to catch "no results" messages
         content = text.slice(2000, 5000);
       }
       return `### ${site.name} (${site.domain})\n${content}`;
+
     } catch(e) {
       return `### ${site.name} (${site.domain})\n(no results)`;
     }
   }));
 
-  // Single Claude call to parse all snippets — no web_search tool needed
   const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -71,18 +90,18 @@ exports.handler = async function(event) {
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 1500,
-      system: `You are a seed availability parser. Extract product info from web search snippets. Respond ONLY with a JSON array — no prose, no markdown, no code fences.`,
+      system: `You are a seed availability parser. Extract product info from search results. Respond ONLY with a JSON array — no prose, no markdown, no code fences.`,
       messages: [{
         role: "user",
         content: `Seed variety: "${seedName}"
 
-Search result snippets per company:
+Search results per company:
 
 ${snippets.join("\n\n")}
 
 Respond with ONLY a JSON array with exactly ${sites.length} objects in the same order as the ### sections:
 [{"domain":"example.com","found":true,"productName":"exact name or null","price":"$X.XX or null","quantity":"e.g. 50 seeds or null","url":"product URL if visible or null","notes":null}]
-Use found:true only when the snippet clearly shows this variety listed for sale.`
+Use found:true only when the results clearly show this variety listed for sale.`
       }]
     })
   });
