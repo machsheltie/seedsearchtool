@@ -14,26 +14,6 @@ exports.handler = async function(event) {
 
   const { seedName, sites } = JSON.parse(event.body);
 
-  // Search URL overrides for sites with non-standard search paths
-  const searchOverrides = {
-    "rareseeds.com":         `https://www.rareseeds.com/catalogsearch/result/?q=`,
-    "fedcoseeds.com":        `https://www.fedcoseeds.com/seeds/search?q=`,
-    "davidsgardenseeds.com": `https://www.davidsgardenseeds.com/catalogsearch/result/?q=`,
-    "johnnyseed.com":        `https://www.johnnyseed.com/search?q=`,
-    "parkseed.com":          `https://parkseed.com/search?q=`,
-    "burpee.com":            `https://www.burpee.com/search?q=`,
-    "harrisseeds.com":       `https://www.harrisseeds.com/storefront/c-1-all-products.aspx?keywords=`,
-    "victoryseeds.com":      `https://www.victoryseeds.com/catalog/search.php?search_query=`,
-    "tomatofest.com":        `https://tomatofest.com/search?q=`,
-    "tomatogrowers.com":     `https://www.tomatogrowers.com/search?q=`,
-    "seedsavers.org":        `https://www.seedsavers.org/search?q=`,
-    "vermontbean.com":       `https://www.vermontbean.com/search?q=`,
-    "seedsnsuch.com":        `https://www.seedsnsuch.com/search?q=`,
-    "tradewindsfruit.com":   `https://www.tradewindsfruit.com/search?q=`,
-  };
-
-  const firstWord = seedName.split(" ")[0].toLowerCase();
-
   const snippets = await Promise.all(sites.map(async (site) => {
     // Try Shopify JSON first — it's instant and works for any Shopify store
     // If the site isn't Shopify or returns nothing, fall through to Jina
@@ -52,22 +32,22 @@ exports.handler = async function(event) {
       }
     } catch(e) { /* not Shopify — fall through to Jina */ }
 
-    // Jina fallback for non-Shopify sites
+    // DuckDuckGo site-search fallback — bypasses Cloudflare blocks and JS-rendered site search
     try {
-      const base = searchOverrides[site.domain] || `https://${site.domain}/search?q=`;
-      const jinaUrl = `https://r.jina.ai/${base}${encodeURIComponent(seedName)}`;
-      const res = await fetch(jinaUrl, {
+      const ddgUrl = `https://r.jina.ai/https://html.duckduckgo.com/html/?q=${encodeURIComponent(seedName + ' site:' + site.domain)}`;
+      const res = await fetch(ddgUrl, {
         headers: { "Accept": "text/plain", "X-No-Cache": "true" },
-        signal: AbortSignal.timeout(6000)
+        signal: AbortSignal.timeout(9000)
       });
       const text = await res.text();
       const textLower = text.toLowerCase();
-      const nameIdx = textLower.indexOf(firstWord, 1500);
+      // Anchor on the domain name in organic results (skips DDG title/header/ads at top)
+      const domainIdx = textLower.indexOf(site.domain.toLowerCase(), 500);
       let content;
-      if (nameIdx > 0) {
-        content = text.slice(Math.max(0, nameIdx - 100), nameIdx + 3000);
+      if (domainIdx > 0) {
+        content = text.slice(Math.max(0, domainIdx - 400), domainIdx + 2000);
       } else {
-        content = text.slice(2000, 5000);
+        content = `No results found for "${seedName}" on ${site.domain}`;
       }
       return `### ${site.name} (${site.domain})\n${content}`;
     } catch(e) {
