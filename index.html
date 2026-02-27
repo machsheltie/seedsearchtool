@@ -306,23 +306,24 @@ async function callClaudeBatch(seedName, sites) {
   const apiKey = document.getElementById('apiKeyInput').value.trim();
   if (!apiKey) throw new Error("No API key — enter it in Settings");
 
-  const siteList  = sites.map(s => `${s.name} (${s.domain})`).join('\n');
-  const siteQuery = sites.map(s => `site:${s.domain}`).join(' OR ');
+  const siteList = sites.map((s, i) => `${i + 1}. ${s.name} — search: "${seedName}" site:${s.domain}`).join('\n');
 
-  const system = `You are a seed availability checker. Search the web once, then respond ONLY with a JSON array — no prose, no markdown, no code fences.`;
+  const system = `You are a seed availability checker. Search each site individually to find product pages. Respond ONLY with a JSON array — no prose, no markdown, no code fences.`;
 
-  const userMsg = `Do any of these companies carry "${seedName}" seeds?
+  const userMsg = `Check if each of these sites carries "${seedName}" seeds. Do one targeted search per site to find the product page and price:
+
 ${siteList}
 
-Search for: "${seedName}" seeds (${siteQuery})
-
-After searching respond with ONLY a JSON array with exactly ${sites.length} objects in the same order:
+After searching all ${sites.length} sites, respond with ONLY a JSON array with exactly ${sites.length} objects in the same order:
 [{"domain":"example.com","found":true,"productName":"exact name or null","price":"$X.XX or null","quantity":"e.g. 50 seeds or null","url":"product URL or null","notes":null}]
-Use found:true only when search results confirm the company carries this variety.`;
+Only use found:true when you confirmed the product page exists. Always include price when visible on the page.`;
 
   let messages = [{ role: "user", content: userMsg }];
 
-  for (let turn = 0; turn < 4; turn++) {
+  // Allow enough turns for one search per site plus final response
+  const maxTurns = sites.length * 2 + 2;
+
+  for (let turn = 0; turn < maxTurns; turn++) {
     const res = await fetch("/.netlify/functions/proxy", {
       method: "POST",
       headers: {
@@ -363,12 +364,15 @@ Use found:true only when search results confirm the company carries this variety
     if (data.stop_reason === "tool_use") {
       const toolUses = data.content.filter(b => b.type === "tool_use");
       if (toolUses.length > 0) {
+        const remaining = sites.length - Math.floor(turn / 2);
         messages.push({
           role: "user",
           content: toolUses.map(t => ({
             type: "tool_result",
             tool_use_id: t.id,
-            content: "Search complete. Now provide your JSON array answer."
+            content: remaining > 1
+              ? `Search complete. Continue searching the remaining sites.`
+              : `Search complete. You have checked all sites. Now provide the JSON array.`
           }))
         });
       }
