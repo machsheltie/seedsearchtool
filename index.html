@@ -507,15 +507,15 @@ async function startSearch() {
 // ── CSV export ─────────────────────────────────────────
 function exportCSV() {
   const seedName = document.getElementById('seedInput').value.trim();
-  const headers  = ['Date','Variety','Found?','Product Name','Price','Quantity','Notes','URL'];
+  const headers  = ['Date','Variety','Company','Found?','Product Name','Price','Quantity','Notes','URL'];
   const now      = new Date().toLocaleDateString();
 
   const rows = searchResults.map(({ site, result, state }) => {
     if (state === 'error' || !result)
-      return [now, seedName, 'Error', '', '', '', '', ''];
+      return [now, seedName, site.name, 'Error', '', '', '', '', ''];
     if (!result.found)
-      return [now, seedName, 'No', '', '', '', '', ''];
-    return [now, seedName, 'Yes',
+      return [now, seedName, site.name, 'No', '', '', '', '', ''];
+    return [now, seedName, site.name, 'Yes',
       result.productName || '', result.price || '',
       result.quantity || '', result.notes || '', result.url || ''];
   });
@@ -543,14 +543,14 @@ async function logToSheets(auto = false) {
   if (logBtn) { logBtn.disabled = true; logBtn.textContent = '↗ Logging…'; }
 
   const now     = new Date().toLocaleString();
-  const HEADERS = ['Date Searched','Variety','Found?','Product Name','Price','Quantity','Notes','URL'];
+  const HEADERS = ['Date Searched','Variety','Company','Found?','Product Name','Price','Quantity','Notes','URL'];
 
   const rows = searchResults.map(({ site, result, state }) => {
     if (state === 'error' || !result)
-      return [now, seedName, 'Error', '', '', '', '', ''];
+      return [now, seedName, site.name, 'Error', '', '', '', '', ''];
     if (!result.found)
-      return [now, seedName, 'No', '', '', '', '', ''];
-    return [now, seedName, 'Yes',
+      return [now, seedName, site.name, 'No', '', '', '', '', ''];
+    return [now, seedName, site.name, 'Yes',
       result.productName || '', result.price || '',
       result.quantity || '', result.notes || '', result.url || ''];
   });
