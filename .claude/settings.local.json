@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(netlify status:*)",
+      "Bash(netlify logout:*)",
+      "Bash(netlify login:*)",
+      "Bash(netlify link:*)",
+      "Bash(netlify unlink:*)",
+      "Bash(netlify deploy:*)",
+      "Bash(git:*)",
+      "WebFetch(domain:r.jina.ai)",
+      "Bash(netlify functions:list:*)",
+      "Bash(node:*)",
+      "Bash(rm:*)"
+    ]
+  }
+}
