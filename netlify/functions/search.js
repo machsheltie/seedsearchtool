@@ -14,17 +14,31 @@ exports.handler = async function(event) {
 
   const { seedName, sites } = JSON.parse(event.body);
 
-  // Fetch DuckDuckGo search results via Jina Reader for each site in parallel (free)
+  // Search URL overrides for sites that don't use the standard /search?q= pattern
+  const searchOverrides = {
+    "fedcoseeds.com":        `https://www.fedcoseeds.com/seeds/search?q=`,
+    "davidsgardenseeds.com": `https://www.davidsgardenseeds.com/catalogsearch/result/?q=`,
+    "johnnyseed.com":        `https://www.johnnyseed.com/search?q=`,
+    "parkseed.com":          `https://parkseed.com/search?q=`,
+    "burpee.com":            `https://www.burpee.com/search?q=`,
+    "harrisseeds.com":       `https://www.harrisseeds.com/storefront/c-1-all-products.aspx?keywords=`,
+    "victoryseeds.com":      `https://www.victoryseeds.com/catalog/search.php?search_query=`,
+    "tomatofest.com":        `https://tomatofest.com/search?q=`,
+    "tomatogrowers.com":     `https://www.tomatogrowers.com/search?q=`,
+  };
+
+  // Fetch each site's own search results page via Jina Reader (free, server-side)
   const snippets = await Promise.all(sites.map(async (site) => {
     try {
-      const query = encodeURIComponent(`"${seedName}" site:${site.domain}`);
-      const jinaUrl = `https://r.jina.ai/https://html.duckduckgo.com/html/?q=${query}`;
+      const base = searchOverrides[site.domain] || `https://${site.domain}/search?q=`;
+      const searchUrl = base + encodeURIComponent(seedName);
+      const jinaUrl = `https://r.jina.ai/${searchUrl}`;
       const res = await fetch(jinaUrl, {
         headers: { "Accept": "text/plain", "X-No-Cache": "true" },
         signal: AbortSignal.timeout(9000)
       });
       const text = await res.text();
-      return `### ${site.name} (${site.domain})\n${text.slice(0, 800)}`;
+      return `### ${site.name} (${site.domain})\n${text.slice(0, 1000)}`;
     } catch(e) {
       return `### ${site.name} (${site.domain})\n(no results)`;
     }
