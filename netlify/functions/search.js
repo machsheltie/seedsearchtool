@@ -39,8 +39,20 @@ exports.handler = async function(event) {
         signal: AbortSignal.timeout(9000)
       });
       const text = await res.text();
-      // Skip Jina's header metadata (~200 chars) and grab enough to clear site navigation
-      return `### ${site.name} (${site.domain})\n${text.slice(200, 3700)}`;
+      // Find first product price ($X.XX) — skips nav text like "Free Shipping over $75"
+      const priceMatch = text.match(/\$\d+\.\d{2}/);
+      const priceIdx = priceMatch ? text.indexOf(priceMatch[0]) : -1;
+      let content;
+      if (priceIdx > 500) {
+        // Extract a window around the first product price to capture name + nearby listings
+        content = text.slice(Math.max(0, priceIdx - 400), priceIdx + 2500);
+      } else if (priceIdx >= 0) {
+        content = text.slice(0, 3000);
+      } else {
+        // No price found — grab mid-page to catch "no results" messages
+        content = text.slice(2000, 4500);
+      }
+      return `### ${site.name} (${site.domain})\n${content}`;
     } catch(e) {
       return `### ${site.name} (${site.domain})\n(no results)`;
     }
