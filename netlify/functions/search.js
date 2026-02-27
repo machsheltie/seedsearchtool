@@ -14,15 +14,7 @@ exports.handler = async function(event) {
 
   const { seedName, sites } = JSON.parse(event.body);
 
-  // Shopify stores expose a clean JSON search API — much faster and more reliable than Jina
-  const shopifyDomains = new Set([
-    "trueleafmarket.com", "highmowingseeds.com", "seedsnow.com",
-    "hudsonvalleyseed.com", "wildboarfarms.com", "threshseed.com",
-    "ufseeds.com", "edenbrothers.com", "territorialseed.com",
-    "beneseeds.com", "asiangarden2table.com", "selectseeds.com",
-  ]);
-
-  // Search URL overrides for non-Shopify sites
+  // Search URL overrides for sites with non-standard search paths
   const searchOverrides = {
     "rareseeds.com":         `https://www.rareseeds.com/catalogsearch/result/?q=`,
     "fedcoseeds.com":        `https://www.fedcoseeds.com/seeds/search?q=`,
@@ -43,21 +35,25 @@ exports.handler = async function(event) {
   const firstWord = seedName.split(" ")[0].toLowerCase();
 
   const snippets = await Promise.all(sites.map(async (site) => {
+    // Try Shopify JSON first — it's instant and works for any Shopify store
+    // If the site isn't Shopify or returns nothing, fall through to Jina
     try {
-      // --- Shopify JSON API (fast, structured) ---
-      if (shopifyDomains.has(site.domain)) {
-        const url = `https://${site.domain}/search.json?q=${encodeURIComponent(seedName)}&type=product`;
-        const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+      const shopifyUrl = `https://${site.domain}/search.json?q=${encodeURIComponent(seedName)}&type=product`;
+      const res = await fetch(shopifyUrl, { signal: AbortSignal.timeout(3000) });
+      if (res.ok && res.headers.get("content-type")?.includes("json")) {
         const json = await res.json();
         const products = (json.results || []).slice(0, 6);
-        if (products.length === 0) return `### ${site.name} (${site.domain})\nNo products found.`;
-        const lines = products.map(p =>
-          `- ${p.title} | $${p.price} | https://${site.domain}${p.url}`
-        ).join("\n");
-        return `### ${site.name} (${site.domain})\n${lines}`;
+        if (products.length > 0) {
+          const lines = products.map(p =>
+            `- ${p.title} | $${p.price} | https://${site.domain}${p.url}`
+          ).join("\n");
+          return `### ${site.name} (${site.domain})\n${lines}`;
+        }
       }
+    } catch(e) { /* not Shopify — fall through to Jina */ }
 
-      // --- Jina Reader for non-Shopify sites ---
+    // Jina fallback for non-Shopify sites
+    try {
       const base = searchOverrides[site.domain] || `https://${site.domain}/search?q=`;
       const jinaUrl = `https://r.jina.ai/${base}${encodeURIComponent(seedName)}`;
       const res = await fetch(jinaUrl, {
@@ -74,7 +70,6 @@ exports.handler = async function(event) {
         content = text.slice(2000, 5000);
       }
       return `### ${site.name} (${site.domain})\n${content}`;
-
     } catch(e) {
       return `### ${site.name} (${site.domain})\n(no results)`;
     }
