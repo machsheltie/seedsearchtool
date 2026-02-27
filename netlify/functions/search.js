@@ -36,21 +36,23 @@ exports.handler = async function(event) {
       const jinaUrl = `https://r.jina.ai/${searchUrl}`;
       const res = await fetch(jinaUrl, {
         headers: { "Accept": "text/plain", "X-No-Cache": "true" },
-        signal: AbortSignal.timeout(9000)
+        signal: AbortSignal.timeout(12000)
       });
       const text = await res.text();
-      // Find first product price ($X.XX) — skips nav text like "Free Shipping over $75"
-      const priceMatch = text.match(/\$\d+\.\d{2}/);
-      const priceIdx = priceMatch ? text.indexOf(priceMatch[0]) : -1;
+      const textLower = text.toLowerCase();
+
+      // Search for the variety name in the page (skip first 1500 chars of nav/header)
+      // Use first word of variety name as it's usually the most distinctive
+      const firstWord = seedName.split(' ')[0].toLowerCase();
+      const nameIdx = textLower.indexOf(firstWord, 1500);
+
       let content;
-      if (priceIdx > 500) {
-        // Extract a window around the first product price to capture name + nearby listings
-        content = text.slice(Math.max(0, priceIdx - 400), priceIdx + 2500);
-      } else if (priceIdx >= 0) {
-        content = text.slice(0, 3000);
+      if (nameIdx > 0) {
+        // Found the variety name — extract around it to capture name + price + nearby listings
+        content = text.slice(Math.max(0, nameIdx - 100), nameIdx + 3000);
       } else {
-        // No price found — grab mid-page to catch "no results" messages
-        content = text.slice(2000, 4500);
+        // Variety name not found — grab a mid-page chunk to catch "no results" messages
+        content = text.slice(2000, 5000);
       }
       return `### ${site.name} (${site.domain})\n${content}`;
     } catch(e) {
