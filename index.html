@@ -171,7 +171,7 @@
     <input type="text" id="seedInput" placeholder="e.g. Dragon Tongue Bean, Mortgage Lifter Tomato…" autocomplete="off" />
     <button id="searchBtn" onclick="startSearch()">Scout It</button>
   </div>
-  <p class="hint">Enter a variety name — Claude will check all 26 companies from its catalog knowledge</p>
+  <p class="hint">Enter a variety name — Claude searches all 26 companies in batches for availability, price, and quantity</p>
 </div>
 
 <div id="status"></div>
@@ -302,44 +302,80 @@ function disconnectSheets() {
 }
 
 // ── Claude API ─────────────────────────────────────────
-async function callClaude(seedName) {
+async function callClaudeBatch(seedName, sites) {
   const apiKey = document.getElementById('apiKeyInput').value.trim();
   if (!apiKey) throw new Error("No API key — enter it in Settings");
 
-  const siteList = SITES.map((s, i) => `${i + 1}. ${s.name} (${s.domain})`).join('\n');
+  const siteList  = sites.map(s => `${s.name} (${s.domain})`).join('\n');
+  const siteQuery = sites.map(s => `site:${s.domain}`).join(' OR ');
 
-  const system = `You are a seed catalog expert. Answer from your training knowledge about what US seed companies carry. Respond ONLY with a JSON array — no prose, no markdown, no code fences.`;
+  const system = `You are a seed availability checker. Search the web once, then respond ONLY with a JSON array — no prose, no markdown, no code fences.`;
 
-  const userMsg = `Which of these seed companies carry "${seedName}" seeds? For each, provide your best knowledge. If you're not confident, use found:false.
-
+  const userMsg = `Do any of these companies carry "${seedName}" seeds?
 ${siteList}
 
-Respond with ONLY a JSON array with exactly ${SITES.length} objects in the same order, using this shape:
-{"domain":"example.com","found":true,"productName":"variety name as listed or null","price":"e.g. $3.99 or null","quantity":"e.g. 50 seeds or null","notes":"brief note or null"}`;
+Search for: "${seedName}" seeds (${siteQuery})
 
-  const res = await fetch("/.netlify/functions/proxy", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01"
-    },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 3000,
-      system,
-      messages: [{ role: "user", content: userMsg }]
-    })
-  });
+After searching respond with ONLY a JSON array with exactly ${sites.length} objects in the same order:
+[{"domain":"example.com","found":true,"productName":"exact name or null","price":"$X.XX or null","quantity":"e.g. 50 seeds or null","url":"product URL or null","notes":null}]
+Use found:true only when search results confirm the company carries this variety.`;
 
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
+  let messages = [{ role: "user", content: userMsg }];
 
-  const text = (data.content || []).find(b => b.type === 'text')?.text || '';
-  const s = text.indexOf('[');
-  const e = text.lastIndexOf(']');
-  if (s === -1 || e <= s) throw new Error("Unexpected response from Claude");
-  return JSON.parse(text.slice(s, e + 1));
+  for (let turn = 0; turn < 4; turn++) {
+    const res = await fetch("/.netlify/functions/proxy", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1500,
+        system,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages
+      })
+    });
+
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+
+    messages.push({ role: "assistant", content: data.content });
+
+    for (const block of data.content) {
+      if (block.type === "text" && block.text.trim()) {
+        const txt = block.text.trim();
+        const s = txt.indexOf('[');
+        const e = txt.lastIndexOf(']');
+        if (s !== -1 && e > s) {
+          try {
+            const parsed = JSON.parse(txt.slice(s, e + 1));
+            if (Array.isArray(parsed)) return parsed;
+          } catch(_) {}
+        }
+      }
+    }
+
+    if (data.stop_reason === "end_turn") break;
+
+    if (data.stop_reason === "tool_use") {
+      const toolUses = data.content.filter(b => b.type === "tool_use");
+      if (toolUses.length > 0) {
+        messages.push({
+          role: "user",
+          content: toolUses.map(t => ({
+            type: "tool_result",
+            tool_use_id: t.id,
+            content: "Search complete. Now provide your JSON array answer."
+          }))
+        });
+      }
+    }
+  }
+
+  return sites.map(s => ({ domain: s.domain, found: false, productName: null, price: null, quantity: null, url: null, notes: null }));
 }
 
 // ── Card rendering ─────────────────────────────────────
@@ -418,33 +454,44 @@ async function startSearch() {
         <div class="card searching" id="card-${s.domain}">
           <div class="card-site"><span class="status-dot dot-searching"></span>${s.name}</div>
           <div class="card-name">${seedName}</div>
-          <div class="searching-msg">Asking Claude…</div>
+          <div class="searching-msg">Queued…</div>
         </div>`).join('')}
     </div>`;
 
-  status.innerHTML = `<span class="spinner"></span> Consulting Claude on all 26 companies…`;
+  status.innerHTML = `<span class="spinner"></span> Searching 26 seed companies…`;
 
-  try {
-    const allResults = await callClaude(seedName);
-    if (currentSearch !== seedName) return;
+  const BATCH_SIZE = 5;
+  let completed = 0, found = 0, batchNum = 0;
 
-    let found = 0;
-    SITES.forEach((site, i) => {
-      const result = allResults[i] || null;
-      const state  = 'done';
+  for (let i = 0; i < SITES.length; i += BATCH_SIZE) {
+    if (currentSearch !== seedName) break;
+    const batch = SITES.slice(i, i + BATCH_SIZE);
+    batchNum++;
+
+    // Mark this batch as actively searching
+    batch.forEach(s => renderCard(s, 'searching', null));
+    status.innerHTML = `<span class="spinner"></span> Searching batch ${batchNum} of ${Math.ceil(SITES.length / BATCH_SIZE)}… (${completed}/${SITES.length} done)`;
+
+    let batchResults;
+    try {
+      batchResults = await callClaudeBatch(seedName, batch);
+    } catch(e) {
+      batchResults = [];
+      batch.forEach(site => renderCard(site, 'error', null, e.message));
+    }
+
+    batch.forEach((site, j) => {
+      const result = (batchResults && batchResults[j]) || null;
       if (result && result.found) found++;
-      renderCard(site, state, result);
-      searchResults.push({ site, result, state });
+      renderCard(site, 'done', result);
+      searchResults.push({ site, result, state: 'done' });
+      completed++;
     });
 
-    updateSummary(seedName, SITES.length, found);
-    status.innerHTML = `✓ Done — ${found} of ${SITES.length} companies carry <em>${seedName}</em>`;
-
-  } catch(e) {
-    status.innerHTML = `Error: ${e.message}`;
-    SITES.forEach(site => renderCard(site, 'error', null, e.message));
+    updateSummary(seedName, completed, found);
   }
 
+  status.innerHTML = `✓ Done — ${found} of ${SITES.length} companies carry <em>${seedName}</em>`;
   btn.disabled = false;
   document.getElementById('exportBar').style.display = 'flex';
   if (oauthToken) {
