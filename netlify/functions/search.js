@@ -16,6 +16,7 @@ exports.handler = async function(event) {
 
   // Search URL overrides for sites that don't use the standard /search?q= pattern
   const searchOverrides = {
+    "rareseeds.com":         `https://www.rareseeds.com/catalogsearch/result/?q=`,
     "fedcoseeds.com":        `https://www.fedcoseeds.com/seeds/search?q=`,
     "davidsgardenseeds.com": `https://www.davidsgardenseeds.com/catalogsearch/result/?q=`,
     "johnnyseed.com":        `https://www.johnnyseed.com/search?q=`,
@@ -38,7 +39,8 @@ exports.handler = async function(event) {
         signal: AbortSignal.timeout(9000)
       });
       const text = await res.text();
-      return `### ${site.name} (${site.domain})\n${text.slice(0, 1000)}`;
+      // Skip Jina's header metadata (~200 chars) and grab enough to clear site navigation
+      return `### ${site.name} (${site.domain})\n${text.slice(200, 3700)}`;
     } catch(e) {
       return `### ${site.name} (${site.domain})\n(no results)`;
     }
@@ -54,7 +56,7 @@ exports.handler = async function(event) {
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 1000,
+      max_tokens: 1500,
       system: `You are a seed availability parser. Extract product info from web search snippets. Respond ONLY with a JSON array — no prose, no markdown, no code fences.`,
       messages: [{
         role: "user",
