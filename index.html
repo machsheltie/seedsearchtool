@@ -465,30 +465,36 @@ async function startSearch() {
   status.innerHTML = `<span class="spinner"></span> Searching 26 seed companies…`;
 
   const BATCH_SIZE = 5;
+  const BATCH_DELAY_MS = 12000;
   let completed = 0, found = 0, batchNum = 0;
+  const totalBatches = Math.ceil(SITES.length / BATCH_SIZE);
 
   for (let i = 0; i < SITES.length; i += BATCH_SIZE) {
     if (currentSearch !== seedName) break;
+    if (i > 0) await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
     const batch = SITES.slice(i, i + BATCH_SIZE);
     batchNum++;
 
-    // Mark this batch as actively searching
     batch.forEach(s => renderCard(s, 'searching', null));
-    status.innerHTML = `<span class="spinner"></span> Searching batch ${batchNum} of ${Math.ceil(SITES.length / BATCH_SIZE)}… (${completed}/${SITES.length} done)`;
+    status.innerHTML = `<span class="spinner"></span> Searching batch ${batchNum} of ${totalBatches}… (${completed}/${SITES.length} done)`;
 
-    let batchResults;
+    let batchResults = null, batchError = null;
     try {
       batchResults = await callClaudeBatch(seedName, batch);
     } catch(e) {
-      batchResults = [];
-      batch.forEach(site => renderCard(site, 'error', null, e.message));
+      batchError = e.message;
     }
 
     batch.forEach((site, j) => {
-      const result = (batchResults && batchResults[j]) || null;
-      if (result && result.found) found++;
-      renderCard(site, 'done', result);
-      searchResults.push({ site, result, state: 'done' });
+      if (batchError) {
+        renderCard(site, 'error', null, batchError);
+        searchResults.push({ site, result: null, state: 'error' });
+      } else {
+        const result = (batchResults && batchResults[j]) || null;
+        if (result && result.found) found++;
+        renderCard(site, 'done', result);
+        searchResults.push({ site, result, state: 'done' });
+      }
       completed++;
     });
 
