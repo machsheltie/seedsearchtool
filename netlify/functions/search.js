@@ -14,54 +14,102 @@ exports.handler = async function(event) {
 
   const { seedName, sites } = JSON.parse(event.body);
 
-  // Search each site concurrently using Claude's built-in web_search tool
-  const results = await Promise.all(sites.map(site => searchSite(apiKey, seedName, site)));
+  // Search URL overrides for sites with non-standard search paths
+  const searchOverrides = {
+    "rareseeds.com":         `https://www.rareseeds.com/catalogsearch/result/?q=`,
+    "fedcoseeds.com":        `https://www.fedcoseeds.com/seeds/search?q=`,
+    "davidsgardenseeds.com": `https://www.davidsgardenseeds.com/catalogsearch/result/?q=`,
+    "johnnyseed.com":        `https://www.johnnyseed.com/search?q=`,
+    "parkseed.com":          `https://parkseed.com/search?q=`,
+    "burpee.com":            `https://www.burpee.com/search?q=`,
+    "harrisseeds.com":       `https://www.harrisseeds.com/storefront/c-1-all-products.aspx?keywords=`,
+    "victoryseeds.com":      `https://www.victoryseeds.com/catalog/search.php?search_query=`,
+    "tomatofest.com":        `https://tomatofest.com/search?q=`,
+    "tomatogrowers.com":     `https://www.tomatogrowers.com/search?q=`,
+    "seedsavers.org":        `https://www.seedsavers.org/search?q=`,
+    "vermontbean.com":       `https://www.vermontbean.com/search?q=`,
+    "seedsnsuch.com":        `https://www.seedsnsuch.com/search?q=`,
+    "tradewindsfruit.com":   `https://www.tradewindsfruit.com/search?q=`,
+    "highmowingseeds.com":   `https://www.highmowingseeds.com/catalogsearch/result/?q=`,
+    "territorialseed.com":   `https://www.territorialseed.com/search?q=`,
+    "edenbrothers.com":      `https://www.edenbrothers.com/search?q=`,
+    "hudsonvalleyseed.com":  `https://hudsonvalleyseed.com/search?q=`,
+  };
 
-  // Return in the same envelope shape the frontend already parses
-  return {
-    statusCode: 200,
-    headers: { ...headers, "Content-Type": "application/json" },
+  const firstWord = seedName.split(" ")[0].toLowerCase();
+
+  const snippets = await Promise.all(sites.map(async (site) => {
+    // Try Shopify JSON first — it's instant and works for any Shopify store
+    // If the site isn't Shopify or returns nothing, fall through to Jina
+    try {
+      const shopifyUrl = `https://${site.domain}/search.json?q=${encodeURIComponent(seedName)}&type=product`;
+      const res = await fetch(shopifyUrl, { signal: AbortSignal.timeout(3000) });
+      if (res.ok && res.headers.get("content-type")?.includes("json")) {
+        const json = await res.json();
+        const products = (json.results || []).slice(0, 6);
+        if (products.length > 0) {
+          const lines = products.map(p =>
+            `- ${p.title} | $${p.price} | https://${site.domain}${p.url}`
+          ).join("\n");
+          return `### ${site.name} (${site.domain})\n${lines}`;
+        }
+      }
+    } catch(e) { /* not Shopify — fall through to Jina */ }
+
+    // Jina fallback: fetch each site's own search results page
+    try {
+      const base = searchOverrides[site.domain] || `https://${site.domain}/search?q=`;
+      const jinaUrl = `https://r.jina.ai/${base}${encodeURIComponent(seedName)}`;
+      const res = await fetch(jinaUrl, {
+        headers: { "Accept": "text/plain", "X-No-Cache": "true" },
+        signal: AbortSignal.timeout(8000)
+      });
+      const text = await res.text();
+      const textLower = text.toLowerCase();
+      // Start search after position 1500 to skip nav/header and find variety name in results
+      const nameIdx = textLower.indexOf(firstWord, 1500);
+      let content;
+      if (nameIdx > 0) {
+        content = text.slice(Math.max(0, nameIdx - 200), nameIdx + 5000);
+      } else {
+        content = text.slice(1500, 6500);
+      }
+      return `### ${site.name} (${site.domain})\n${content}`;
+    } catch(e) {
+      return `### ${site.name} (${site.domain})\n(no results)`;
+    }
+  }));
+
+  const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
     body: JSON.stringify({
-      content: [{ type: "text", text: JSON.stringify(results) }]
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1500,
+      system: `You are a seed availability parser. Extract product info from search results. Respond ONLY with a JSON array — no prose, no markdown, no code fences.`,
+      messages: [{
+        role: "user",
+        content: `Seed variety: "${seedName}"
+
+Search results per company:
+
+${snippets.join("\n\n")}
+
+Respond with ONLY a JSON array with exactly ${sites.length} objects in the same order as the ### sections:
+[{"domain":"example.com","found":true,"productName":"exact name or null","price":"$X.XX or null","quantity":"e.g. 50 seeds or null","url":"product URL if visible or null","notes":null}]
+Use found:true only when the results clearly show this variety listed for sale.`
+      }]
     })
+  });
+
+  const data = await claudeRes.json();
+  return {
+    statusCode: claudeRes.status,
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify(data)
   };
 };
-
-async function searchSite(apiKey, seedName, site) {
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 4096,
-        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
-        system: "You are a seed availability checker. Always respond with ONLY a JSON object — no prose, no markdown fences.",
-        messages: [{
-          role: "user",
-          content: `Search ${site.domain} for "${seedName}" seeds. Is this exact variety listed for sale on their website right now? Find the product name, price, quantity per packet, and the direct product page URL.
-
-Respond with ONLY this JSON (no other text):
-{"domain":"${site.domain}","found":true,"productName":"exact name","price":"$X.XX","quantity":"e.g. 50 seeds","url":"https://...","notes":null}
-
-Use found:true only if you confirm this variety is currently listed for sale on ${site.domain}. If not found, use found:false and null for all other fields.`
-        }]
-      })
-    });
-
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-
-    // web_search_20250305 is server-side: returns stop_reason "end_turn" in one call
-    const text = (data.content || []).find(b => b.type === "text")?.text || "";
-    const s = text.indexOf("{");
-    const e = text.lastIndexOf("}");
-    if (s >= 0 && e > s) return JSON.parse(text.slice(s, e + 1));
-  } catch(err) { /* fall through to default */ }
-
-  return { domain: site.domain, found: false, productName: null, price: null, quantity: null, url: null, notes: null };
-}
