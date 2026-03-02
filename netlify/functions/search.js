@@ -14,6 +14,30 @@ exports.handler = async function(event) {
 
   const { seedName, sites } = JSON.parse(event.body);
 
+  // Search URL overrides for sites with non-standard search paths
+  const searchOverrides = {
+    "rareseeds.com":         `https://www.rareseeds.com/catalogsearch/result/?q=`,
+    "fedcoseeds.com":        `https://www.fedcoseeds.com/seeds/search?q=`,
+    "davidsgardenseeds.com": `https://www.davidsgardenseeds.com/catalogsearch/result/?q=`,
+    "johnnyseed.com":        `https://www.johnnyseed.com/search?q=`,
+    "parkseed.com":          `https://parkseed.com/search?q=`,
+    "burpee.com":            `https://www.burpee.com/search?q=`,
+    "harrisseeds.com":       `https://www.harrisseeds.com/storefront/c-1-all-products.aspx?keywords=`,
+    "victoryseeds.com":      `https://www.victoryseeds.com/catalog/search.php?search_query=`,
+    "tomatofest.com":        `https://tomatofest.com/search?q=`,
+    "tomatogrowers.com":     `https://www.tomatogrowers.com/search?q=`,
+    "seedsavers.org":        `https://www.seedsavers.org/search?q=`,
+    "vermontbean.com":       `https://www.vermontbean.com/search?q=`,
+    "seedsnsuch.com":        `https://www.seedsnsuch.com/search?q=`,
+    "tradewindsfruit.com":   `https://www.tradewindsfruit.com/search?q=`,
+    "highmowingseeds.com":   `https://www.highmowingseeds.com/catalogsearch/result/?q=`,
+    "territorialseed.com":   `https://www.territorialseed.com/search?q=`,
+    "edenbrothers.com":      `https://www.edenbrothers.com/search?q=`,
+    "hudsonvalleyseed.com":  `https://hudsonvalleyseed.com/search?q=`,
+  };
+
+  const firstWord = seedName.split(" ")[0].toLowerCase();
+
   const snippets = await Promise.all(sites.map(async (site) => {
     // Try Shopify JSON first — it's instant and works for any Shopify store
     // If the site isn't Shopify or returns nothing, fall through to Jina
@@ -32,22 +56,23 @@ exports.handler = async function(event) {
       }
     } catch(e) { /* not Shopify — fall through to Jina */ }
 
-    // DuckDuckGo site-search fallback — bypasses Cloudflare blocks and JS-rendered site search
+    // Jina fallback: fetch each site's own search results page
     try {
-      const ddgUrl = `https://r.jina.ai/https://html.duckduckgo.com/html/?q=${encodeURIComponent(seedName + ' site:' + site.domain)}`;
-      const res = await fetch(ddgUrl, {
+      const base = searchOverrides[site.domain] || `https://${site.domain}/search?q=`;
+      const jinaUrl = `https://r.jina.ai/${base}${encodeURIComponent(seedName)}`;
+      const res = await fetch(jinaUrl, {
         headers: { "Accept": "text/plain", "X-No-Cache": "true" },
-        signal: AbortSignal.timeout(9000)
+        signal: AbortSignal.timeout(8000)
       });
       const text = await res.text();
       const textLower = text.toLowerCase();
-      // Anchor on the domain name in organic results (skips DDG title/header/ads at top)
-      const domainIdx = textLower.indexOf(site.domain.toLowerCase(), 500);
+      // Start search after position 1500 to skip nav/header and find variety name in results
+      const nameIdx = textLower.indexOf(firstWord, 1500);
       let content;
-      if (domainIdx > 0) {
-        content = text.slice(Math.max(0, domainIdx - 400), domainIdx + 2000);
+      if (nameIdx > 0) {
+        content = text.slice(Math.max(0, nameIdx - 200), nameIdx + 5000);
       } else {
-        content = `No results found for "${seedName}" on ${site.domain}`;
+        content = text.slice(1500, 6500);
       }
       return `### ${site.name} (${site.domain})\n${content}`;
     } catch(e) {
